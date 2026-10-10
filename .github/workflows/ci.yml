@@ -40,7 +40,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install poetry && poetry install --no-root
-      - run: poetry run pytest tests -vv
+      - run: PYTHONPATH=src poetry run pytest tests -vv
 
   build_and_push:
     name: Build & Push Container Image
