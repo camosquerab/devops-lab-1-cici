@@ -1,0 +1,192 @@
+name: Destroy Lab Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      student_suffix:
+        description: 'Student Suffix (e.g. test-student)'
+        required: true
+        type: string
+      confirm_destroy:
+        description: 'Type DESTROY to confirm'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  destroy:
+    name: Destroy AWS Infrastructure
+    runs-on: ubuntu-latest
+
+    if: ${{ inputs.confirm_destroy == 'DESTROY' }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Validate Student Suffix
+        env:
+          STUDENT_SUFFIX: ${{ inputs.student_suffix }}
+        run: |
+          if [[ ! "$STUDENT_SUFFIX" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
+            echo "Invalid student suffix"
+            exit 1
+          fi
+
+      - name: Identify AWS Resources
+        env:
+          STUDENT_SUFFIX: ${{ inputs.student_suffix }}
+        run: |
+          echo "AWS Region: $AWS_REGION"
+          echo "Student Suffix: $STUDENT_SUFFIX"
+          echo "ECR Repository: greeting-$STUDENT_SUFFIX"
+
+          aws sts get-caller-identity
+
+      - name: Stop and Delete ECS Services
+        env:
+          STUDENT_SUFFIX: ${{ inputs.student_suffix }}
+        run: |
+          set -euo pipefail
+
+          echo "Searching ECS clusters..."
+
+          CLUSTERS=$(aws ecs list-clusters \
+            --query 'clusterArns[]' \
+            --output text)
+
+          for CLUSTER in $CLUSTERS; do
+
+            CLUSTER_NAME="${CLUSTER##*/}"
+
+            if [[ "$CLUSTER_NAME" != *"$STUDENT_SUFFIX"* ]]; then
+              continue
+            fi
+
+            echo "Processing cluster: $CLUSTER_NAME"
+
+            SERVICES=$(aws ecs list-services \
+              --cluster "$CLUSTER" \
+              --query 'serviceArns[]' \
+              --output text)
+
+            for SERVICE in $SERVICES; do
+
+              SERVICE_NAME="${SERVICE##*/}"
+
+              if [[ "$SERVICE_NAME" != *"$STUDENT_SUFFIX"* ]]; then
+                continue
+              fi
+
+              echo "Deleting service: $SERVICE_NAME"
+
+              aws ecs update-service \
+                --cluster "$CLUSTER" \
+                --service "$SERVICE" \
+                --desired-count 0
+
+              aws ecs delete-service \
+                --cluster "$CLUSTER" \
+                --service "$SERVICE" \
+                --force
+
+              aws ecs wait services-inactive \
+                --cluster "$CLUSTER" \
+                --services "$SERVICE"
+
+            done
+
+          done
+
+      - name: Delete Empty ECS Clusters
+        env:
+          STUDENT_SUFFIX: ${{ inputs.student_suffix }}
+        run: |
+          set -euo pipefail
+
+          CLUSTERS=$(aws ecs list-clusters \
+            --query 'clusterArns[]' \
+            --output text)
+
+          for CLUSTER in $CLUSTERS; do
+
+            CLUSTER_NAME="${CLUSTER##*/}"
+
+            if [[ "$CLUSTER_NAME" != *"$STUDENT_SUFFIX"* ]]; then
+              continue
+            fi
+
+            SERVICES=$(aws ecs list-services \
+              --cluster "$CLUSTER" \
+              --query 'serviceArns[]' \
+              --output text)
+
+            TASKS=$(aws ecs list-tasks \
+              --cluster "$CLUSTER" \
+              --query 'taskArns[]' \
+              --output text)
+
+            if [[ -z "$SERVICES" && -z "$TASKS" ]]; then
+
+              echo "Deleting cluster: $CLUSTER_NAME"
+
+              aws ecs delete-cluster \
+                --cluster "$CLUSTER"
+
+            else
+              echo "Cluster not empty: $CLUSTER_NAME"
+            fi
+
+          done
+
+      - name: Delete ECR Repository
+        env:
+          STUDENT_SUFFIX: ${{ inputs.student_suffix }}
+        run: |
+          set -euo pipefail
+
+          REPOSITORY="greeting-$STUDENT_SUFFIX"
+
+          echo "Checking ECR repository: $REPOSITORY"
+
+          if aws ecr describe-repositories \
+            --repository-names "$REPOSITORY" \
+            >/dev/null 2>&1; then
+
+            echo "Deleting ECR repository and images..."
+
+            aws ecr delete-repository \
+              --repository-name "$REPOSITORY" \
+              --force
+
+            echo "ECR repository deleted"
+
+          else
+
+            echo "ECR repository does not exist"
+
+          fi
+
+      - name: Cleanup Summary
+        run: |
+          echo "=================================="
+          echo "AWS LAB CLEANUP COMPLETED"
+          echo "=================================="
+          echo "ECS matching services processed"
+          echo "Empty matching clusters processed"
+          echo "ECR repository processed"
+          echo "=================================="
+          echo "Check EC2, Auto Scaling, ELB,"
+          echo "CloudWatch and networking manually."s
